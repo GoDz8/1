@@ -1,0 +1,44 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body,
+#root {
+  background-color: #0A0F1E;
+  min-height: 100%;
+}
+
+/* Prevent iOS input zoom */
+input,
+textarea,
+select {
+  font-size: 16px !important;
+}
+
+/* Hide scrollbars but keep scrollability */
+.scrollbar-none {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.scrollbar-none::-webkit-scrollbar {
+  display: none;
+}
+
+/* Smooth tap feedback on mobile */
+button {
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Bounce animation for loading dots */
+@keyframes bounce {
+  0%, 80%, 100% { transform: translateY(0); }
+  40% { transform: translateY(-6px); }
+}
+.animate-bounce {
+  animation: bounce 1.2s infinite ease-in-out;
+}
