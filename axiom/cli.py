@@ -152,6 +152,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     rp2 = sub.add_parser("report", help="learning report: calibration / attribution / walk-forward")
     rp2.set_defaults(func=cmd_report)
+
+    tk = sub.add_parser("ticket", help="render the latest ENTER decision as a manual-execution ticket")
+    tk.add_argument("--decision-id", help="specific decision_id (default: latest ENTER)")
+    tk.set_defaults(func=cmd_ticket)
     return p
 
 
@@ -206,6 +210,29 @@ def cmd_report(args) -> int:
         print(f"\n=== Walk-forward (spec §11 meta) ===")
         print(f"  windows={wf['n_windows']} OOS_mean={wf['out_of_sample_mean']} "
               f"degradation={wf['degradation']}")
+    db.close()
+    return 0
+
+
+def cmd_ticket(args) -> int:
+    import json
+
+    from .models import Decision
+    from .reasoning.ticket import render_ticket
+    cfg = load_config()
+    db = Database(cfg.db_path)
+    if args.decision_id:
+        row = db.query_one("SELECT payload_json FROM decisions WHERE decision_id=?",
+                           (args.decision_id,))
+    else:
+        row = db.query_one("SELECT payload_json FROM decisions WHERE decision='ENTER' "
+                           "ORDER BY timestamp DESC LIMIT 1")
+    if row is None:
+        print("No matching ENTER decision found. Run a cycle or simulate first.")
+        db.close()
+        return 1
+    decision = Decision.model_validate(json.loads(row["payload_json"]))
+    print(render_ticket(decision))
     db.close()
     return 0
 

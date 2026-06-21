@@ -13,6 +13,7 @@ from datetime import datetime, time, timezone
 
 from .config import Config, resolve_tier
 from .data.catalysts import CatalystSource, NullCatalystSource
+from .data.market_data import realized_vol, simple_moving_average
 from .data.robinhood_mcp import OptionChain, RobinhoodAdapter
 from .execution.guard import KillSwitchState
 from .execution.manage import run_management
@@ -97,6 +98,22 @@ def _proxy_iv_rank(db: Database, symbol: str, current_iv: float) -> float | None
     return rank
 
 
+def _price_history(adapter, symbol: str, lookback: int = 60):
+    """Recent underlying closes if the adapter exposes them (sim/live), else None.
+
+    Optional adapter capability — the pure Mock has no path, so regime stays
+    CHOP for it (unchanged Phase-1 behavior).
+    """
+    fn = getattr(adapter, "get_price_history", None)
+    if fn is None:
+        return None
+    try:
+        hist = fn(symbol, lookback)
+    except Exception:  # noqa: BLE001 — fail closed: no history -> CHOP default
+        return None
+    return hist if hist else None
+
+
 def _dte_bucket(dte: int) -> str:
     if dte <= 7:
         return "0-7"
@@ -130,10 +147,17 @@ def process_symbol(db: Database, adapter: RobinhoodAdapter, cfg: Config,
     catalyst = catalysts.find_catalyst(symbol)
     oi_ok, spread_ok = _liquidity_ok(chain, cfg)
 
-    # Regime (Step 1). Mock has no MA history; default CHOP unless event pending.
+    # Regime (Step 1). Use real price history when the adapter provides it
+    # (trend vs 20/50 MA, realized vs implied); else fall back to CHOP/event.
+    sma20 = sma50 = rvol = None
+    history = _price_history(adapter, symbol)
+    if history is not None and len(history) >= 50:
+        sma20 = simple_moving_average(history, 20)
+        sma50 = simple_moving_average(history, 50)
+        rvol = realized_vol(history, 20)
     snap = RegimeSnapshot(
-        vix=ks.vix, price=chain.underlying.last, sma20=None, sma50=None,
-        realized_vol=None, implied_vol=atm_iv,
+        vix=ks.vix, price=chain.underlying.last, sma20=sma20, sma50=sma50,
+        realized_vol=rvol, implied_vol=atm_iv,
         days_to_major_event=days_to_earnings,
     )
     regime = regime_override or label_regime(snap, cfg.kill_switch)

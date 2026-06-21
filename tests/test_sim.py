@@ -16,6 +16,37 @@ def test_sim_adapter_paths_are_deterministic():
     assert a.iv_at("NVDA", 30) == b.iv_at("NVDA", 30)
 
 
+def test_price_history_has_no_lookahead():
+    ad = SimAdapter(CFG, ["NVDA"], 5000, 120, seed=1)
+    ad.set_day(30)
+    hist = ad.get_price_history("NVDA", lookback=60)
+    assert len(hist) == 31              # days 0..30 inclusive, no future bars
+    assert hist[-1] == ad.spot_at("NVDA", 30)
+    assert hist[0] == ad.spot_at("NVDA", 0)
+
+
+def test_regime_enrichment_varies_with_path():
+    # With real price history the sim must produce non-CHOP regimes somewhere.
+    from axiom.config import load_config
+    from axiom.orchestrator import _price_history
+    from axiom.data.market_data import realized_vol, simple_moving_average
+    from axiom.regime import RegimeSnapshot, label_regime
+    cfg = load_config()
+    ad = SimAdapter(cfg, ["NVDA"], 5000, 200, seed=3)
+    seen = set()
+    for day in range(60, 200):
+        ad.set_day(day)
+        h = _price_history(ad, "NVDA")
+        snap = RegimeSnapshot(
+            vix=None, price=ad.spot_at("NVDA", day),
+            sma20=simple_moving_average(h, 20), sma50=simple_moving_average(h, 50),
+            realized_vol=realized_vol(h, 20), implied_vol=ad.iv_at("NVDA", day),
+            days_to_major_event=999,
+        )
+        seen.add(label_regime(snap, cfg.kill_switch).value)
+    assert seen - {"CHOP"}  # at least one trending (RISK_ON/RISK_OFF) regime
+
+
 def test_close_path_expires_position_and_records_outcome(db):
     ad = SimAdapter(CFG, ["NVDA"], 5000, 60, seed=1)
     ad.set_day(0)

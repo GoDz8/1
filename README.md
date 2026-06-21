@@ -60,8 +60,8 @@ quant engine:  black_scholes · greeks · iv_solver · iv_rank · payoff · ev
 | `axiom/backtest/` | Event-driven backtester (conservative; see module header) |
 | `axiom/sim.py` | Phase-2 synthetic validation simulator (closes the learning loop) |
 | `axiom/orchestrator.py` | The decision cycle (Steps 1–9), market-hours aware |
-| `axiom/cli.py` | `run-cycle`, `run-paper`, `dashboard`, `backtest`, `simulate`, `report` |
-| `tests/` | 149 tests: golden-value quant, FD Greeks cross-checks, isotonic/Wilson/walk-forward, risk invariants, sim/learning e2e |
+| `axiom/cli.py` | `run-cycle`, `run-paper`, `dashboard`, `backtest`, `simulate`, `report`, `ticket` |
+| `tests/` | 154 tests: golden-value quant, FD Greeks cross-checks, isotonic/Wilson/walk-forward, risk invariants, regime, sim/learning e2e |
 
 ## Setup
 

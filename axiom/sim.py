@@ -115,6 +115,13 @@ class SimAdapter:
     def get_days_to_earnings(self, symbol: str) -> int:
         return 999  # no earnings in the synthetic study (not the focus here)
 
+    def get_price_history(self, symbol: str, lookback: int = 60) -> list[float]:
+        """Closes up to and including the current sim-day (no lookahead)."""
+        path = self.paths[symbol].spot
+        end = min(self.day, len(path) - 1) + 1
+        start = max(0, end - lookback)
+        return [float(x) for x in path[start:end]]
+
     def get_option_chain(self, symbol: str, dte_target: int) -> OptionChain:
         spot = self.spot_at(symbol, self.day)
         iv = self.iv_at(symbol, self.day)
