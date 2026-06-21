@@ -15,8 +15,12 @@ from .config import Config, resolve_tier
 from .data.catalysts import CatalystSource, NullCatalystSource
 from .data.robinhood_mcp import OptionChain, RobinhoodAdapter
 from .execution.guard import KillSwitchState
+from .execution.manage import run_management
 from .execution.paper_executor import execute_paper
+from .learning.attribution import load_suppression
+from .learning.calibration import load_calibration
 from .learning.ledger import capture_decision
+from .learning.memory import retrieve_similar
 from .logging_setup import get_logger
 from .models import Decision, DecisionType, Features, Mode, Regime
 from .quant.iv_rank import iv_rank as compute_iv_rank
@@ -106,7 +110,8 @@ def _dte_bucket(dte: int) -> str:
 def process_symbol(db: Database, adapter: RobinhoodAdapter, cfg: Config,
                    symbol: str, mode: Mode, regime_override: Regime | None,
                    ks: KillSwitchState, catalysts: CatalystSource,
-                   reasoner: StubReasoner) -> tuple[Decision, list]:
+                   reasoner: StubReasoner, calibration=None,
+                   suppression=None) -> tuple[Decision, list]:
     """Run Steps 2-7 for a single symbol. Returns (decision, candidates)."""
     account = adapter.get_account()
     chain = adapter.get_option_chain(symbol, TARGET_DTE)
@@ -142,10 +147,20 @@ def process_symbol(db: Database, adapter: RobinhoodAdapter, cfg: Config,
         sector_cluster=cfg.cluster_for(symbol), catalyst_type=(catalyst.kind if catalyst else None),
         dte_bucket=_dte_bucket(TARGET_DTE), days_to_earnings=days_to_earnings,
     )
+    # Layer-4 retrieval: similar resolved past cases, keyed on the top candidate's
+    # structure (no-op until a track record exists).
+    rep_struct = None
+    accepted = [c for c in candidates if c.accepted]
+    if accepted:
+        rep_struct = max(accepted, key=lambda c: c.ev.ev_per_dollar_risk).structure_type.value
+    past_cases = retrieve_similar(db, cfg, symbol, regime.value, rep_struct, iv_rank) \
+        if rep_struct else []
+
     ctx = DecisionContext(
         symbol=symbol, mode=mode, regime=regime, account=account,
         portfolio=portfolio, candidates=candidates, features=features,
         days_to_earnings=days_to_earnings, kill_switch=ks,
+        calibration=calibration, suppression=suppression, past_cases=past_cases,
     )
     if gating.is_empty:
         return _pass_decision(ctx, "gating empty: " + "; ".join(gating.reasons)), candidates
@@ -164,12 +179,40 @@ def _empty_ctx(symbol, mode, account, ks, portfolio=None) -> DecisionContext:
     )
 
 
+def manage_open_positions(db: Database, adapter: RobinhoodAdapter,
+                          cfg: Config) -> list[dict]:
+    """Decision-cycle Step 9 for live/paper: mark open positions off the current
+    chain (wall-clock time remaining) and apply the §5.5 exit rules."""
+    from datetime import datetime, timezone
+
+    def market_fn(pos):
+        chain = adapter.get_option_chain(pos.symbol, max(pos.dte_remaining, 1))
+        spot = chain.underlying.last if chain else 0.0
+        iv = next((q.iv for q in chain.quotes if q.iv), 0.0) if chain else 0.0
+        row = db.query_one("SELECT opened_at FROM positions WHERE position_id=?",
+                           (pos.position_id,))
+        held_days = 0.0
+        if row and row["opened_at"]:
+            try:
+                opened = datetime.fromisoformat(row["opened_at"])
+                if opened.tzinfo is None:
+                    opened = opened.replace(tzinfo=timezone.utc)
+                held_days = (datetime.now(timezone.utc) - opened).total_seconds() / 86400.0
+            except (ValueError, TypeError):
+                held_days = 0.0
+        t = max(0.0, (pos.dte_remaining - held_days)) / 365.0
+        return spot, iv, t
+
+    return run_management(db, cfg, market_fn)
+
+
 def run_cycle(db: Database, adapter: RobinhoodAdapter, cfg: Config,
               mode: Mode = Mode.PAPER, symbols=None,
               ks: KillSwitchState | None = None,
               catalysts: CatalystSource | None = None,
               reasoner: StubReasoner | None = None,
-              regime_override: Regime | None = None) -> CycleReport:
+              regime_override: Regime | None = None,
+              manage: bool = True) -> CycleReport:
     """Run one full decision cycle over the watchlist (spec §4)."""
     symbols = list(symbols or cfg.watchlist)
     ks = ks or KillSwitchState()
@@ -184,11 +227,22 @@ def run_cycle(db: Database, adapter: RobinhoodAdapter, cfg: Config,
     db.record_metric("nlv", nlv)
     db.record_metric("tier", float(tier.tier.value))
 
+    # Step 9 first: manage existing positions before considering new entries.
+    if manage and mode is Mode.PAPER:
+        closures = manage_open_positions(db, adapter, cfg)
+        for c in closures:
+            _log.info("closed %s (%s) pnl/contract %.2f", c["symbol"], c["reason"], c["pnl"])
+
+    # Load learning maps once per cycle (spec §11 Layers 2-3; no-op until sample).
+    calibration = load_calibration(db)
+    suppression = load_suppression(db)
+
     decisions: list[Decision] = []
     for symbol in symbols:
         try:
             decision, candidates = process_symbol(
-                db, adapter, cfg, symbol, mode, regime_override, ks, catalysts, reasoner)
+                db, adapter, cfg, symbol, mode, regime_override, ks, catalysts,
+                reasoner, calibration=calibration, suppression=suppression)
         except Exception as exc:  # noqa: BLE001 — fail closed to PASS
             _log.exception("symbol %s errored -> PASS: %s", symbol, exc)
             ctx = _empty_ctx(symbol, mode, account, ks)

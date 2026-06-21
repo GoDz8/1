@@ -157,6 +157,35 @@ class SizingConfig:
 # Portfolio limits (spec §5.2) and kill switches (spec §5.4).
 # --------------------------------------------------------------------------- #
 @dataclass(frozen=True)
+class ExitConfig:
+    """Exit discipline (spec §5.5). STARTING hypotheses validated by the
+    backtester / walk-forward meta-loop, not assumed facts."""
+
+    # Credit structures.
+    profit_target_pct: float = 0.50     # close at ~50% of max profit
+    stop_mult_credit: float = 2.0       # stop at ~2x credit received (loss)
+    time_stop_dte: int = 21             # manage tested side at ~21 DTE
+    # Debit structures.
+    debit_profit_target_pct: float = 0.75
+    debit_stop_pct: float = 0.50        # cut at 50% of debit lost
+
+
+@dataclass(frozen=True)
+class LearningConfig:
+    """Continuous-learning loop knobs (spec §11). All adaptations are slow,
+    sample-gated, and can NEVER touch the §5.6 risk envelope."""
+
+    min_resolved_for_calibration: int = 50  # apply calibration map only above N
+    min_bucket_n: int = 20                  # never act on a bucket below this N
+    shrinkage_k: int = 20                   # Bayesian shrinkage strength
+    time_decay_halflife_days: float = 90.0  # recent data weighted more
+    retrieval_k: int = 5                    # similar past cases injected
+    reliability_bins: int = 10
+    # A bucket is suppressed only if its shrunk expectancy is significantly < 0.
+    suppress_expectancy_threshold: float = 0.0
+
+
+@dataclass(frozen=True)
 class PortfolioLimits:
     max_portfolio_heat: float = 0.25     # sum of open max-losses / NLV
     max_correlation_cluster: float = 0.12  # aggregate max-loss per cluster / NLV
@@ -210,6 +239,8 @@ class Config:
     ev: EVConfig = field(default_factory=EVConfig)
     slippage: SlippageConfig = field(default_factory=SlippageConfig)
     sizing: SizingConfig = field(default_factory=SizingConfig)
+    exit_rules: ExitConfig = field(default_factory=ExitConfig)
+    learning: LearningConfig = field(default_factory=LearningConfig)
     portfolio: PortfolioLimits = field(default_factory=PortfolioLimits)
     kill_switch: KillSwitchConfig = field(default_factory=KillSwitchConfig)
     pdt: PDTConfig = field(default_factory=PDTConfig)

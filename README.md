@@ -6,10 +6,12 @@ structures** (the volatility-risk-premium edge); it buys premium only when IV is
 cheap *and* a dated catalyst exists, never into earnings, and it does nothing
 when conviction or expected value is insufficient.
 
-> **Status: Phase 1 complete (paper only).** There is **no live-order code** in
-> this repository. The live path (`review_option_order` → `place_option_order`)
-> is Phase 3 and gated on explicit operator approval. See the build plan in the
-> spec (§7) for phasing.
+> **Status: Phase 1 + Phase 2 complete (paper/sim only).** There is **no
+> live-order code** in this repository. The live path (`review_option_order` →
+> `place_option_order`) is Phase 3 and gated on explicit operator approval.
+> Phase 2 adds the position-management close path (§5.5), the continuous-learning
+> loop (§11 Layers 2–5 + walk-forward), and a synthetic validation simulator that
+> closes the loop end-to-end.
 
 ## Core principles
 
@@ -53,12 +55,13 @@ quant engine:  black_scholes · greeks · iv_solver · iv_rank · payoff · ev
 | `axiom/strategy/` | §3 gating + EV-gated candidate construction |
 | `axiom/regime.py` | Regime metrics → label |
 | `axiom/reasoning/` | LLM wrapper, prompts (§2/§4.1/§9), deterministic stub reasoner |
-| `axiom/execution/` | Pre-trade guard + kill switches; **paper** executor only |
-| `axiom/learning/` | Layer-1 forecast/outcome ledger (capture) |
+| `axiom/execution/` | Pre-trade guard + kill switches; **paper** executor + position manager (§5.5 close path) |
+| `axiom/learning/` | §11 loop: ledger (L1), calibration (L2), attribution/adaptive gating (L3), memory (L4), post-mortems (L5), walk-forward meta-loop, refresh orchestration |
 | `axiom/backtest/` | Event-driven backtester (conservative; see module header) |
+| `axiom/sim.py` | Phase-2 synthetic validation simulator (closes the learning loop) |
 | `axiom/orchestrator.py` | The decision cycle (Steps 1–9), market-hours aware |
-| `axiom/cli.py` | `run-cycle`, `run-paper`, `dashboard`, `backtest` |
-| `tests/` | 111 tests: golden-value quant, FD Greeks cross-checks, risk invariants, e2e |
+| `axiom/cli.py` | `run-cycle`, `run-paper`, `dashboard`, `backtest`, `simulate`, `report` |
+| `tests/` | 149 tests: golden-value quant, FD Greeks cross-checks, isotonic/Wilson/walk-forward, risk invariants, sim/learning e2e |
 
 ## Setup
 
@@ -79,6 +82,13 @@ python3 -m venv .venv
 
 # strategy backtest (needs Yahoo Finance egress; see note below)
 .venv/bin/python -m axiom.cli backtest --symbol SPY --period 2y
+
+# Phase-2 synthetic validation: opens/manages/closes positions over a price path,
+# then drives the learning loop (calibration, attribution, walk-forward)
+.venv/bin/python -m axiom.cli simulate --days 504 --nlv 8000
+
+# learning report: calibration reliability, per-bucket expectancy, walk-forward
+.venv/bin/python -m axiom.cli report
 ```
 
 The reasoning layer runs fully offline via a deterministic stub. To use Claude
@@ -101,8 +111,8 @@ for live reasoning, set `ANTHROPIC_API_KEY` (see `.env.example`).
 
 ## What's next (later phases)
 
-Phase 2: paper-fill calibration & strategy validation. Phase 3: live wiring
-(operator-gated). Phase 4: unattended scheduling, alerting, learning Layers 2–5
-and the walk-forward meta-loop.
+Phase 3: live wiring (operator-gated; no live-order code exists yet). Phase 4:
+unattended scheduling, alerting, and live recalibration against real paper-fill
+data (the simulator's VRP assumption is replaced by measured realized-vs-implied).
 
 *Options trading carries substantial risk of loss. This is a tool, not advice.*

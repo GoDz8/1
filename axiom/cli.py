@@ -142,7 +142,72 @@ def build_parser() -> argparse.ArgumentParser:
     bt.add_argument("--period", default="2y")
     bt.add_argument("--dte", type=int, default=30)
     bt.set_defaults(func=cmd_backtest)
+
+    sm = sub.add_parser("simulate", help="Phase-2 synthetic validation run (closes the learning loop)")
+    sm.add_argument("--nlv", type=float, default=8000.0)
+    sm.add_argument("--days", type=int, default=252)
+    sm.add_argument("--seed", type=int, default=7)
+    sm.add_argument("--symbols", help="comma-separated override of the watchlist")
+    sm.set_defaults(func=cmd_simulate)
+
+    rp2 = sub.add_parser("report", help="learning report: calibration / attribution / walk-forward")
+    rp2.set_defaults(func=cmd_report)
     return p
+
+
+def cmd_simulate(args) -> int:
+    cfg = load_config()
+    db = Database(cfg.db_path)
+    from .sim import run_simulation
+    symbols = args.symbols.split(",") if args.symbols else None
+    rep = run_simulation(db, cfg, symbols=symbols, nlv=args.nlv,
+                         horizon_days=args.days, seed=args.seed)
+    print(f"\nSimulation: {rep.days}d, {rep.cycles} cycles, {len(symbols or cfg.watchlist)} symbols")
+    print(f"  entries={rep.entries} closes={rep.closes} wins={rep.wins} "
+          f"realized=${rep.realized_pnl} final_nlv=${rep.final_nlv}")
+    if rep.closes:
+        print(f"  realized win rate: {rep.wins / rep.closes:.0%}")
+    print(f"  calibration n={rep.calibration_n} "
+          f"brier={round(rep.brier, 4) if rep.brier else 'n/a'} "
+          f"log_loss={round(rep.log_loss, 4) if rep.log_loss else 'n/a'}")
+    print(f"  suppressed buckets: {rep.suppressed_buckets or 'none'}")
+    print("  NOTE: synthetic study with the VRP edge encoded — exercises the loop, "
+          "does NOT certify live edge (see axiom/sim.py header).")
+    db.close()
+    return 0
+
+
+def cmd_report(args) -> int:
+    cfg = load_config()
+    db = Database(cfg.db_path)
+    from .learning.calibration import (brier_score, collect_pairs, load_calibration,
+                                        log_loss, reliability_diagram)
+    from .learning.attribution import compute_bucket_stats
+    pairs = collect_pairs(db)
+    cmap = load_calibration(db)
+    print(f"\n=== Calibration (spec §11 L2) ===  resolved pairs: {len(pairs)}")
+    print(f"  map n={cmap.n} shrink_weight={cmap.shrink_weight:.2f} "
+          f"(applied once n>= the gate)")
+    bs, ll = brier_score(pairs), log_loss(pairs)
+    print(f"  Brier={round(bs, 4) if bs is not None else 'n/a'}  "
+          f"log-loss={round(ll, 4) if ll is not None else 'n/a'}")
+    for pm, of, c in reliability_diagram(pairs):
+        print(f"    bin pred~{pm:.2f}  observed={of:.2f}  n={c}")
+    print(f"\n=== Attribution (spec §11 L3) ===")
+    stats = compute_bucket_stats(db, cfg.learning)
+    if not stats:
+        print("  (no resolved buckets yet)")
+    for s in sorted(stats.values(), key=lambda x: x.shrunk_expectancy):
+        flag = " SUPPRESSED" if s.suppressed else ""
+        print(f"  {s.key:<34} n={s.n:<3} hit={s.hit_rate:.2f} "
+              f"E/risk(shrunk)={s.shrunk_expectancy:+.3f}{flag}")
+    wf = db.get_learning_state("walkforward_report")
+    if wf:
+        print(f"\n=== Walk-forward (spec §11 meta) ===")
+        print(f"  windows={wf['n_windows']} OOS_mean={wf['out_of_sample_mean']} "
+              f"degradation={wf['degradation']}")
+    db.close()
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:

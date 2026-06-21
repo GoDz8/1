@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, timedelta
 
 from ..config import Config
@@ -44,6 +44,11 @@ class DecisionContext:
     features: Features
     days_to_earnings: int | None
     kill_switch: KillSwitchState
+    # Continuous-learning signals (spec §11). Sample-gated; default to no-ops so
+    # the system behaves identically to Phase 1 until a real sample accumulates.
+    calibration: "object | None" = None      # CalibrationMap; .apply(p)->p'
+    suppression: "object | None" = None      # SuppressionMap; .is_suppressed(...)
+    past_cases: list = field(default_factory=list)  # list[PastCase] for context
 
 
 def inputs_ref(ctx: DecisionContext) -> str:
@@ -135,16 +140,36 @@ def _pass_decision(ctx: DecisionContext, reason: str,
     )
 
 
+def _memory_note(past_cases: list) -> str:
+    """Summarize retrieved similar past cases for the decision thesis (Layer 4)."""
+    if not past_cases:
+        return ""
+    wins = sum(1 for c in past_cases if getattr(c, "win", False))
+    return f" [memory: {wins}/{len(past_cases)} similar prior cases won]"
+
+
 class StubReasoner:
     """Deterministic selection + conviction (no API key required)."""
 
     def decide(self, ctx: DecisionContext, cfg: Config) -> Decision:
         accepted = [c for c in ctx.candidates if c.accepted]
+        # Adaptive gating (spec §11 Layer 3): drop buckets with statistically
+        # significant negative realized expectancy. No-op until a sample exists.
+        if ctx.suppression is not None:
+            accepted = [
+                c for c in accepted
+                if not ctx.suppression.is_suppressed(
+                    c.structure_type.value, ctx.regime.value, ctx.features.iv_rank)
+            ]
         if not accepted:
             return _pass_decision(ctx, "no EV-positive candidate qualified")
 
         # Select the highest expectancy-per-risk candidate (spec §4.4).
         best = max(accepted, key=lambda c: c.ev.ev_per_dollar_risk)
+        # Calibration (spec §11 Layer 2): correct POP for historical over/under-
+        # confidence before it feeds sizing. Identity until N>=min_resolved.
+        cal_pop = (ctx.calibration.apply(best.ev.pop)
+                   if ctx.calibration is not None else best.ev.pop)
         breakdown = score_conviction(best, ctx, cfg)
         conviction = (breakdown.ev_strength + breakdown.regime_alignment
                       + breakdown.catalyst_quality + breakdown.liquidity
@@ -153,9 +178,11 @@ class StubReasoner:
         if conviction < cfg.sizing.conviction_floor:
             return _pass_decision(ctx, f"conviction {conviction} below floor", conviction, breakdown)
 
-        # Deterministic sizing (spec §5.1).
+        # Deterministic sizing (spec §5.1). Uses the CALIBRATED POP so a
+        # historically overconfident model sizes smaller — learning can only
+        # shrink risk here, never raise it past the §5.6 caps.
         sizing = size_position(
-            pop=best.ev.pop, max_profit=best.ev.max_profit, max_loss=best.ev.max_loss,
+            pop=cal_pop, max_profit=best.ev.max_profit, max_loss=best.ev.max_loss,
             conviction=conviction, nlv=ctx.account.nlv,
             per_trade_cap=cfg.per_trade_cap,
             remaining_heat_dollars=ctx.portfolio.remaining_heat_dollars(cfg),
@@ -209,8 +236,9 @@ class StubReasoner:
                 pct_of_nlv=sizing.pct_of_nlv,
             ),
             thesis=(f"{best.structure_type.value} on {ctx.symbol}: IV-rank "
-                    f"{ctx.features.iv_rank}, POP {best.ev.pop:.2f}, EV/risk "
-                    f"{best.ev.ev_per_dollar_risk:.3f} after slippage in {ctx.regime.value}."),
+                    f"{ctx.features.iv_rank}, POP {best.ev.pop:.2f} (cal {cal_pop:.2f}), "
+                    f"EV/risk {best.ev.ev_per_dollar_risk:.3f} after slippage in "
+                    f"{ctx.regime.value}." + _memory_note(ctx.past_cases)),
             invalidation=("Underlying breaches the short strike with trend confirmation, "
                           "or IV rank collapses below 30 (edge gone)."),
             risk_checks=guard.checks,
