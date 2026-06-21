@@ -51,7 +51,7 @@ quant engine:  black_scholes · greeks · iv_solver · iv_rank · payoff · ev
 | `axiom/quant/` | Deterministic quant engine (BS, Greeks, IV, payoff, EV, slippage, sizing, portfolio) |
 | `axiom/models.py` | Pydantic §8 decision schema + hard-rule validators |
 | `axiom/storage/` | SQLite schema + DB access (full retention contract) |
-| `axiom/data/` | Robinhood adapter (Protocol + mock), yfinance, catalysts |
+| `axiom/data/` | Robinhood adapter (Protocol + mock + **snapshot real-data adapter**), yfinance, catalysts |
 | `axiom/strategy/` | §3 gating + EV-gated candidate construction |
 | `axiom/regime.py` | Regime metrics → label |
 | `axiom/reasoning/` | LLM wrapper, prompts (§2/§4.1/§9), deterministic stub reasoner |
@@ -60,8 +60,8 @@ quant engine:  black_scholes · greeks · iv_solver · iv_rank · payoff · ev
 | `axiom/backtest/` | Event-driven backtester (conservative; see module header) |
 | `axiom/sim.py` | Phase-2 synthetic validation simulator (closes the learning loop) |
 | `axiom/orchestrator.py` | The decision cycle (Steps 1–9), market-hours aware |
-| `axiom/cli.py` | `run-cycle`, `run-paper`, `dashboard`, `backtest`, `simulate`, `report`, `ticket` |
-| `tests/` | 154 tests: golden-value quant, FD Greeks cross-checks, isotonic/Wilson/walk-forward, risk invariants, regime, sim/learning e2e |
+| `axiom/cli.py` | `run-cycle`, `run-paper`, `dashboard`, `backtest`, `simulate`, `report`, `ticket`, `snapshot-cycle` |
+| `tests/` | 159 tests: golden-value quant, FD Greeks cross-checks, isotonic/Wilson/walk-forward, risk invariants, regime, snapshot, sim/learning e2e |
 
 ## Setup
 
@@ -94,12 +94,37 @@ python3 -m venv .venv
 The reasoning layer runs fully offline via a deterministic stub. To use Claude
 for live reasoning, set `ANTHROPIC_API_KEY` (see `.env.example`).
 
+## Real-data input (snapshot bridge)
+
+The running Python process can't call the agent-side Robinhood MCP tools, so real
+data flows in via a **snapshot**: the agent fetches account + chains + quotes via
+the MCP read tools (`get_equity_quotes`, `get_option_chains`,
+`get_option_instruments`, `get_option_quotes`, `get_equity_historicals`),
+normalizes them into `data/snapshot.py`'s JSON schema, and
+`SnapshotRobinhoodAdapter` serves them to the *same* RobinhoodAdapter Protocol —
+so AXIOM runs its full decision cycle on **real market data** with zero engine
+changes, and places no orders.
+
+```bash
+.venv/bin/python -m axiom.cli snapshot-cycle --file data/snapshot_example.json
+```
+
+Robinhood's option quotes already carry real IV + Greeks + OI, so no IV-solving
+is needed. **IV rank still needs a history of IV** (spec §6): a single capture
+yields `iv_rank=None` → PASS (fail closed); repeated daily captures accrue the
+real history (in `learning_state`) that unlocks entries — no rank is ever
+fabricated. Real captures (which include account balances) are git-ignored under
+`data/snapshots/`; `data/snapshot_example.json` shows the format with placeholder
+account values. (Observed live: SOFI put spreads priced **−EV after real
+bid/ask slippage** — the wide quotes destroy the edge, exactly the small-account
+friction the spec flags.)
+
 ## Notes & known limitations
 
-- **Robinhood MCP** is an agent-side tool surface, not a Python library; live
-  account auth is not wired in Phase 1. The adapter is a `Protocol` with a
-  deterministic `MockRobinhoodAdapter`; a real MCP-client implementation is the
-  Phase-3 integration seam.
+- **Robinhood MCP** is an agent-side tool surface, not a Python library; the
+  adapter is a `Protocol` with a `MockRobinhoodAdapter`, a `SimAdapter`, and a
+  `SnapshotRobinhoodAdapter` (real data). An autonomous live MCP-client sidecar
+  remains the Phase-3 seam.
 - **Backtester** uses underlying history + Black-Scholes priced at realized vol,
   so its expectancy is a *conservative lower bound* (it understates the VRP edge)
   — use it to reject negative-expectancy strategies, not to certify an exact

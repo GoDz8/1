@@ -156,6 +156,10 @@ def build_parser() -> argparse.ArgumentParser:
     tk = sub.add_parser("ticket", help="render the latest ENTER decision as a manual-execution ticket")
     tk.add_argument("--decision-id", help="specific decision_id (default: latest ENTER)")
     tk.set_defaults(func=cmd_ticket)
+
+    sc = sub.add_parser("snapshot-cycle", help="run a decision cycle on a captured REAL-data snapshot")
+    sc.add_argument("--file", required=True, help="path to a snapshot JSON (see data/snapshot.py)")
+    sc.set_defaults(func=cmd_snapshot_cycle)
     return p
 
 
@@ -233,6 +237,46 @@ def cmd_ticket(args) -> int:
         return 1
     decision = Decision.model_validate(json.loads(row["payload_json"]))
     print(render_ticket(decision))
+    db.close()
+    return 0
+
+
+def cmd_snapshot_cycle(args) -> int:
+    from .data.snapshot import SnapshotRobinhoodAdapter, load_snapshot
+    from .models import DecisionType
+    cfg = load_config()
+    db = Database(cfg.db_path)
+    snap = load_snapshot(args.file)
+    adapter = SnapshotRobinhoodAdapter(snap)
+    symbols = list(snap.get("symbols", {}).keys())
+    acct = adapter.get_account()
+    print(f"\nSnapshot captured {snap.get('captured_at', '?')} | "
+          f"NLV ${acct.nlv if acct else 0:.2f}  BP ${acct.buying_power if acct else 0:.2f}")
+    report = run_cycle(db, adapter, cfg, mode=Mode.PAPER, symbols=symbols, manage=False)
+    _print_decisions(report)
+    # Pre-gate PREVIEW: the engine's economics computed from REAL quotes (Greeks,
+    # IV, slippage). A single capture has no IV-rank history -> the gated decision
+    # honestly PASSes; this preview shows the real quant the data already drives.
+    from .strategy.candidates import build_candidates
+    from .strategy.gating import StrategyFamily
+    print("\nReal-quote economics PREVIEW (pre-gate; needs multi-day IV history to ENTER):")
+    for sym in symbols:
+        chain = adapter.get_option_chain(sym, 35)
+        if chain is None:
+            continue
+        cands = build_candidates(chain, (StrategyFamily.CREDIT_SPREAD,
+                                         StrategyFamily.IRON_CONDOR), cfg, 35)
+        if not cands:
+            print(f"  {sym:<6} (no constructible defined-risk spread from snapshot)")
+        for c in cands:
+            verdict = c.rejected_reason or "ACCEPTED (EV-positive)"
+            print(f"  {sym:<6} {c.structure_type.value:<18} POP={c.ev.pop:.2f} "
+                  f"EV(after slip)={c.ev.ev_after_slippage:+.2f} "
+                  f"EV/risk={c.ev.ev_per_dollar_risk:+.3f}  maxloss=${c.ev.max_loss:.0f}  {verdict}")
+    for d in report.decisions:
+        if d.decision is DecisionType.ENTER:
+            from .reasoning.ticket import render_ticket
+            print("\n" + render_ticket(d, adapter.review_option_order(d.symbol, [])))
     db.close()
     return 0
 
